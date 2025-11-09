@@ -9,13 +9,13 @@ import (
 // Spread represents a potential arbitrage opportunity between two exchanges.
 type Spread struct {
 	UnifiedSymbol   string   `json:"unified_symbol"`
-	ExchangeShort   string   `json:"exchange_short"`              // The exchange to sell on (higher bid).
-	ExchangeLong    string   `json:"exchange_long"`               // The exchange to buy on (lower ask).
-	EntrySpread     float64  `json:"entry_spread"`                // The calculated profit percentage for entering the trade.
-	OpenDiff        float64  `json:"open_diff"`                   // The raw price difference (Bid_Short - Ask_Long).
-	ExitSpread      float64  `json:"exit_spread"`                 // The calculated profit percentage for exiting the trade.
-	ExitDiff        float64  `json:"exit_diff"`                   // The raw price difference (Bid_Long - Ask_Short).
-	FundingSpread8h *float64 `json:"funding_spread_8h,omitempty"` // The 8-hour funding spread.
+	ExchangeShort   string   `json:"exchange_short"`    // The exchange to sell on (higher bid).
+	ExchangeLong    string   `json:"exchange_long"`     // The exchange to buy on (lower ask).
+	EntrySpread     float64  `json:"entry_spread"`      // The calculated profit percentage for entering the trade.
+	OpenDiff        float64  `json:"open_diff"`         // The raw price difference (Bid_Short - Ask_Long).
+	ExitSpread      float64  `json:"exit_spread"`       // The calculated profit percentage for exiting the trade.
+	ExitDiff        float64  `json:"exit_diff"`         // The raw price difference (Bid_Long - Ask_Short).
+	FundingSpread8h *float64 `json:"funding_spread_8h"` // The 8-hour funding spread.
 }
 
 // CalculateSpreads identifies arbitrage opportunities from a map of tickers.
