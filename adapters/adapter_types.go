@@ -41,19 +41,19 @@ type MexcContractDetailResponse struct {
 	Data    []MexcContractDetailDto `json:"data"`
 }
 
-// MexcFundingRateData represents the inner 'data' object of a funding rate message.
-type MexcFundingRateData struct {
+// MexcFundingRateDto represents the funding rate information from Mexc's HTTP endpoint.
+type MexcFundingRateDto struct {
 	Symbol         string  `json:"symbol"`
-	Rate           float64 `json:"rate"`
+	FundingRate    float64 `json:"fundingRate"`
 	NextSettleTime int64   `json:"nextSettleTime"`
+	CollectCycle   int     `json:"collectCycle"`
 }
 
-// MexcFundingRateMessage represents the full WebSocket message for a funding rate update.
-type MexcFundingRateMessage struct {
-	Channel string              `json:"channel"`
-	Symbol  string              `json:"symbol"`
-	Data    MexcFundingRateData `json:"data"`
-	Ts      int64               `json:"ts"`
+// MexcFundingRateResponse represents the full response from Mexc's funding rate endpoint.
+type MexcFundingRateResponse struct {
+	Success bool               `json:"success"`
+	Code    int                `json:"code"`
+	Data    MexcFundingRateDto `json:"data"`
 }
 
 // MexcTickerDto represents a single ticker response from Mexc.

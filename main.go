@@ -48,7 +48,10 @@ func main() {
 		slog.Error("Failed to initialize Mexc adapter", "error", err)
 		os.Exit(1) // Exit if a critical component fails to start
 	}
-	defer mexcAdapter.Close() // Ensure connections are closed on exit
+	defer mexcAdapter.Close() // Ensure Redis client is closed on exit
+
+	// Load initial funding rates from Redis
+	mexcAdapter.LoadFundingRatesFromRedis()
 
 	// Set up RabbitMQ
 	rabbitUser := os.Getenv("RABBITMQ_DEFAULT_USER")
@@ -96,19 +99,24 @@ func main() {
 	go func() {
 		<-sigChan
 		slog.Info("Shutdown signal received, closing connections...")
-		mexcAdapter.Close()
+		mexcAdapter.Close() // Close Redis client
 		ch.Close()
 		conn.Close()
 		os.Exit(0)
 	}()
 
-	// Goroutine to restart Mexc adapter every 5 minutes
+	// Goroutine to update Mexc funding rates periodically
 	go func() {
-		restartTicker := time.NewTicker(5 * time.Minute)
-		defer restartTicker.Stop()
-		for range restartTicker.C {
-			if err := mexcAdapter.Restart(); err != nil {
-				slog.Error("Failed to restart Mexc adapter", "error", err)
+		// Run once at the start
+		if _, err := mexcAdapter.UpdateFundingRates(); err != nil {
+			slog.Error("Failed to perform initial Mexc funding rate update", "error", err)
+		}
+		// Then run every 10 minutes
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if _, err := mexcAdapter.UpdateFundingRates(); err != nil {
+				slog.Error("Failed to update Mexc funding rates", "error", err)
 			}
 		}
 	}()
@@ -198,7 +206,7 @@ func main() {
 
 		// Calculate and log arbitrage opportunities
 		slog.Info("Calculating arbitrage opportunities...")
-		spreads := arbitrage.CalculateSpreads(allTickers)
+		spreads := arbitrage.CalculateSpreads(allTickers, binanceAdapter.FundingRates, mexcAdapter.FundingRates)
 
 		if len(spreads) == 0 {
 			slog.Info("No arbitrage opportunities found in this cycle.")

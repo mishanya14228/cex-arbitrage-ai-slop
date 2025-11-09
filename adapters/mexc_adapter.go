@@ -1,119 +1,244 @@
 package adapters
 
 import (
-	"context" // Added context import
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"cex-price-diff-notifications/shared"
+
+	"github.com/go-redis/redis/v8"
 )
 
 const (
 	mexcFuturesURL         = "https://contract.mexc.com"
 	mexcContractDetailPath = "/api/v1/contract/detail"
 	mexcTickersPath        = "/api/v1/contract/ticker"
+	mexcFundingRatePath    = "/api/v1/contract/funding_rate/" // Note the trailing slash
+	redisMexcFundingPrefix = "mexc:funding_rate:"
+	redisTTL               = 8 * time.Hour
 )
 
 // MexcAdapter holds state and logic for interacting with the Mexc API.
 type MexcAdapter struct {
-	FundingRates map[string]MexcFundingRateData
+	FundingRates map[string]MexcFundingRateDto
 	mu           sync.RWMutex
-	symbols      []string
-
-	ctx    context.Context
-	cancel context.CancelFunc
+	redisClient  *redis.Client
 }
 
-// NewMexcAdapter creates a new instance of the MexcAdapter and starts WebSocket connections.
+// NewMexcAdapter creates a new instance of the MexcAdapter.
 func NewMexcAdapter() (*MexcAdapter, error) {
 	slog.Info("Initializing Mexc adapter...")
 
-	adapter := &MexcAdapter{
-		FundingRates: make(map[string]MexcFundingRateData),
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     "redis:6379", // Redis host and port
+		Password: redisPassword,
+		DB:       0, // default DB
+	})
+
+	// Ping Redis to check connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := redisClient.Ping(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
+	slog.Info("Connected to Redis successfully.")
 
-	// Initial setup of context
-	adapter.ctx, adapter.cancel = context.WithCancel(context.Background())
-
-	if err := adapter.initConnections(); err != nil {
-		adapter.cancel() // Ensure context is cancelled on init failure
-		return nil, err
+	adapter := &MexcAdapter{
+		FundingRates: make(map[string]MexcFundingRateDto),
+		redisClient:  redisClient,
 	}
 
 	return adapter, nil
 }
 
-// initConnections fetches contract details and starts WebSocket connections.
-// This is called by NewMexcAdapter and Restart.
-func (a *MexcAdapter) initConnections() error {
+// Close closes the Redis client connection.
+func (a *MexcAdapter) Close() error {
+	if a.redisClient != nil {
+		slog.Info("Closing Redis client connection...")
+		return a.redisClient.Close()
+	}
+	return nil
+}
+
+// LoadFundingRatesFromRedis loads Mexc funding rates from Redis into the adapter's cache.
+func (a *MexcAdapter) LoadFundingRatesFromRedis() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	keys, err := a.redisClient.Keys(ctx, redisMexcFundingPrefix+"*").Result()
+	if err != nil {
+		slog.Error("Failed to get Redis keys for Mexc funding rates", "error", err)
+		return
+	}
+
+	if len(keys) == 0 {
+		slog.Info("No Mexc funding rates found in Redis to load.")
+		return
+	}
+
+	slog.Info("Loading Mexc funding rates from Redis...", "count", len(keys))
+	for _, key := range keys {
+		val, err := a.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			slog.Warn("Failed to get Mexc funding rate from Redis", "key", key, "error", err)
+			continue
+		}
+
+		var dto MexcFundingRateDto
+		if err := json.Unmarshal([]byte(val), &dto); err != nil {
+			slog.Warn("Failed to unmarshal Mexc funding rate from Redis", "key", key, "error", err)
+			continue
+		}
+		unifiedSymbol := strings.TrimPrefix(key, redisMexcFundingPrefix)
+		a.FundingRates[unifiedSymbol] = dto
+	}
+	slog.Info("Finished loading Mexc funding rates from Redis.", "loaded_count", len(a.FundingRates))
+}
+
+// UpdateFundingRates fetches funding rates for all symbols from Mexc using a rate-limited HTTP approach.
+func (a *MexcAdapter) UpdateFundingRates() (time.Duration, error) {
+	start := time.Now()
+	slog.Info("Starting Mexc funding rate update...")
+
 	// 1. Fetch all contract details to get the list of symbols
 	resp, err := http.Get(mexcFuturesURL + mexcContractDetailPath)
 	if err != nil {
-		return fmt.Errorf("failed to fetch Mexc contract details: %w", err)
+		return 0, fmt.Errorf("failed to fetch Mexc contract details: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read Mexc contract details response: %w", err)
+		return 0, fmt.Errorf("failed to read Mexc contract details response: %w", err)
 	}
 
 	var detailResponse MexcContractDetailResponse
 	if err := json.Unmarshal(body, &detailResponse); err != nil {
-		return fmt.Errorf("failed to unmarshal Mexc contract details: %w", err)
+		return 0, fmt.Errorf("failed to unmarshal Mexc contract details: %w", err)
 	}
 	if !detailResponse.Success {
-		return fmt.Errorf("Mexc contract details API returned success: false")
+		return 0, fmt.Errorf("Mexc contract details API returned success: false")
 	}
 
-	a.symbols = nil // Clear old symbols
+	var symbols []string
 	for _, detail := range detailResponse.Data {
-		a.symbols = append(a.symbols, detail.Symbol)
+		symbols = append(symbols, detail.Symbol)
 	}
-	slog.Info("Fetched all Mexc symbols", "count", len(a.symbols))
+	slog.Info("Fetched all Mexc symbols for funding rates", "count", len(symbols))
 
-	// Clear old funding rates
+	// 2. Fetch funding rates in rate-limited chunks
+	const chunkSize = 10
+	const delay = 2 * time.Second
+
+	newFundingRates := make(map[string]MexcFundingRateDto)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // Mutex to protect the newFundingRates map
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute) // Context for HTTP requests
+	defer cancel()
+
+	for i := 0; i < len(symbols); i += chunkSize {
+		end := i + chunkSize
+		if end > len(symbols) {
+			end = len(symbols)
+		}
+		chunk := symbols[i:end]
+
+		slog.Debug("Fetching funding rate chunk", "chunk_size", len(chunk), "start_index", i)
+
+		for _, symbol := range chunk {
+			wg.Add(1)
+			go func(s string) {
+				defer wg.Done()
+				url := mexcFuturesURL + mexcFundingRatePath + s
+				req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+				if err != nil {
+					slog.Warn("Failed to create HTTP request for Mexc funding rate", "symbol", s, "error", err)
+					return
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					slog.Warn("Failed to fetch Mexc funding rate", "symbol", s, "error", err)
+					return
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					slog.Warn("Mexc funding rate API returned non-OK status", "symbol", s, "status", resp.StatusCode)
+					return
+				}
+
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					slog.Warn("Failed to read Mexc funding rate response body", "symbol", s, "error", err)
+					return
+				}
+
+				var fundingResponse MexcFundingRateResponse
+				if err := json.Unmarshal(body, &fundingResponse); err != nil {
+					slog.Warn("Failed to unmarshal Mexc funding rate", "symbol", s, "error", err)
+					return
+				}
+
+				if fundingResponse.Success {
+					unifiedSymbol, err := UnwrapMexcSymbol(fundingResponse.Data.Symbol)
+					if err == nil {
+						mu.Lock()
+						newFundingRates[unifiedSymbol] = fundingResponse.Data
+						mu.Unlock()
+					}
+				} else {
+					slog.Warn("Mexc funding rate API returned success: false", "symbol", s, "code", fundingResponse.Code)
+				}
+			}(symbol)
+		}
+
+		// Wait for the current chunk to finish before sleeping
+		wg.Wait()
+
+		// If this is not the last chunk, sleep to respect rate limits
+		if end < len(symbols) {
+			time.Sleep(delay)
+		}
+	}
+
+	// 3. Atomically update the adapter's funding rates map
 	a.mu.Lock()
-	a.FundingRates = make(map[string]MexcFundingRateData)
+	a.FundingRates = newFundingRates
 	a.mu.Unlock()
 
-	// Start WebSocket connections in the background
-	a.startWsConnections(a.ctx) // Pass the adapter's context
-
-	return nil
-}
-
-// Restart closes existing connections and re-initializes them.
-func (a *MexcAdapter) Restart() error {
-	slog.Info("Restarting Mexc adapter connections...")
-
-	// 1. Cancel the old context to stop existing goroutines
-	a.cancel()
-	// Give some time for goroutines to shut down gracefully
-	time.Sleep(1 * time.Second)
-
-	// 2. Create a new context for new goroutines
-	a.ctx, a.cancel = context.WithCancel(context.Background())
-
-	// 3. Re-initialize connections
-	if err := a.initConnections(); err != nil {
-		a.cancel() // Ensure context is cancelled on init failure
-		return fmt.Errorf("failed to re-initialize Mexc connections during restart: %w", err)
+	// 4. Persist new funding rates to Redis
+	redisCtx, redisCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer redisCancel()
+	for unifiedSymbol, dto := range newFundingRates {
+		key := redisMexcFundingPrefix + unifiedSymbol
+		val, err := json.Marshal(dto)
+		if err != nil {
+			slog.Error("Failed to marshal Mexc funding rate for Redis", "symbol", unifiedSymbol, "error", err)
+			continue
+		}
+		if err := a.redisClient.Set(redisCtx, key, val, redisTTL).Err(); err != nil {
+			slog.Error("Failed to save Mexc funding rate to Redis", "symbol", unifiedSymbol, "error", err)
+		}
 	}
-	slog.Info("Mexc adapter connections restarted successfully.")
-	return nil
-}
+	slog.Info("Persisted Mexc funding rates to Redis.", "count", len(newFundingRates))
 
-// Close cancels the adapter's context, stopping all associated goroutines.
-func (a *MexcAdapter) Close() {
-	slog.Info("Closing Mexc adapter...")
-	a.cancel()
+	duration := time.Since(start)
+	slog.Info("Mexc funding rate update complete", "duration", duration, "updated_count", len(newFundingRates))
+	return duration, nil
 }
 
 // GetTickers fetches the latest book tickers from Mexc.

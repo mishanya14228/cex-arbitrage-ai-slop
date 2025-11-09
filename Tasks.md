@@ -286,3 +286,52 @@ we need to start pushing messages to rabbitmq:
 - keep it null for now
 - define a non durable queue for rabbimq called "arbitrage_event"
 - push Opportunity to this queue
+
+# Step 13
+change of heart, lets wipe out sockets for mexc, instead we are going to use 
+- endpoint api/v1/contract/funding_rate/{symbol}
+- response:
+  {
+  "success": true,
+  "code": 0,
+  "data": {
+  "symbol": "BTC_USDT",
+  "fundingRate": -0.000489,
+  "collectCycle": 8,
+  "nextSettleTime": 1609833600000,
+  }
+  }
+- rate limit is 20 requests per 2 seconds.
+
+so every time we "Restart" the fetcher of mexc we chunk the tokens in a way that we fit rate limits. we should also leave the room and only use like 17 requests per 2 seconds.
+we should store something like
+type BinanceFundingRateDto struct {
+Symbol               string `json:"symbol"`
+LastFundingRate      string `json:"lastFundingRate"`
+NextFundingTime      int64  `json:"nextFundingTime"`
+FundingIntervalHours int    `json:"fundingIntervalHours"`
+}
+but for mexc:
+fundingRate = lastFundingRate
+collectCycle = fundingIntervalHours
+nextSettleTime = 1609833600000
+
+# Step 14
+Lets make mexc funding data persistent in redis. on app start we should load the data from redis to adapter and when we save the data to adapter we should also persist it in redis. basically in case we need to reload app we should already have some data, that's the only purpose. use ttl of 8 hours
+
+redis runs on host "redis", port 6379 and uses "REDIS_PASSWORD" env as password
+
+# Step 15
+Calculating funding rate apr per 8h 
+
+r = funding rate value
+side = -1 for long, +1 for short
+N = interval
+
+PnL = side⋅r⋅(8 / N)
+
+to calculate spread simply calculate pnl for both exchanges and sum it up then pass to rabbitmq
+
+# Step 16
+
+please also add raw funding rate information to rabbitmq messages. the should be the same standartized struct format
