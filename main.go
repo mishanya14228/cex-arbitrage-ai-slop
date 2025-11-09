@@ -27,24 +27,26 @@ func main() {
 
 	slog.Info("Application starting")
 
+	// Create adapter instances
+	binanceAdapter := adapters.NewBinanceAdapter()
+	mexcAdapter := adapters.NewMexcAdapter()
+
 	// Create a ticker that fires every 5 seconds
 	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop() // Ensure the ticker is stopped when main exits
+	defer ticker.Stop()
 
 	for range ticker.C {
-		slog.Info("Fetching tickers...")
+		slog.Info("Fetching data...")
 
-		// This map will hold all tickers, structured for the calculator.
-		// map[unified_symbol] -> map[exchange_name] -> Ticker
 		allTickers := make(map[string]map[string]shared.TickerBidAsk)
-		var mu sync.Mutex // Mutex to protect concurrent writes to the map.
+		var mu sync.Mutex
 		var wg sync.WaitGroup
 
 		// Fetch Binance tickers
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			binanceTickersDto, duration, err := adapters.GetBinanceTickers()
+			binanceTickersDto, duration, err := binanceAdapter.GetTickers()
 			if err != nil {
 				slog.Error("Failed to get Binance tickers", "error", err)
 				return
@@ -59,7 +61,6 @@ func main() {
 					}
 					continue
 				}
-
 				mu.Lock()
 				if _, ok := allTickers[genericTicker.UnifiedSymbol]; !ok {
 					allTickers[genericTicker.UnifiedSymbol] = make(map[string]shared.TickerBidAsk)
@@ -73,7 +74,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mexcTickersDto, duration, err := adapters.GetMexcTickers()
+			mexcTickersDto, duration, err := mexcAdapter.GetTickers()
 			if err != nil {
 				slog.Error("Failed to get Mexc tickers", "error", err)
 				return
@@ -88,7 +89,6 @@ func main() {
 					}
 					continue
 				}
-
 				mu.Lock()
 				if _, ok := allTickers[genericTicker.UnifiedSymbol]; !ok {
 					allTickers[genericTicker.UnifiedSymbol] = make(map[string]shared.TickerBidAsk)
@@ -98,7 +98,19 @@ func main() {
 			}
 		}()
 
-		wg.Wait() // Wait for both goroutines to complete
+		// Update Binance funding rates
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			duration, err := binanceAdapter.UpdateFundingRates()
+			if err != nil {
+				slog.Error("Failed to update Binance funding rates", "error", err)
+				return
+			}
+			slog.Info("Binance funding rates updated", "duration", duration)
+		}()
+
+		wg.Wait()
 
 		// Calculate and log arbitrage opportunities
 		slog.Info("Calculating arbitrage opportunities...")
@@ -117,7 +129,7 @@ func main() {
 					"buy_at", s.ExchangeLong,
 					"sell_at", s.ExchangeShort,
 					"entry_spread_%", s.EntrySpread,
-					"exit_spread_%", s.ExitSpread, // Added exit spread
+					"exit_spread_%", s.ExitSpread,
 				)
 			}
 		}

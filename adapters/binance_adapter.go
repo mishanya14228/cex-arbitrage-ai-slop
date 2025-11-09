@@ -7,34 +7,49 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"cex-price-diff-notifications/shared" // Import the shared package
+	"cex-price-diff-notifications/shared"
 )
 
 const (
-	BinanceFuturesURL     = "https://fapi.binance.com"
-	BinanceBookTickerPath = "/fapi/v1/ticker/bookTicker"
+	binanceFuturesURL     = "https://fapi.binance.com"
+	binanceBookTickerPath = "/fapi/v1/ticker/bookTicker"
+	binanceFundingRatePath = "/fapi/v1/fundingRate"
 )
 
-// GetBinanceTickers fetches tickers from Binance.
-func GetBinanceTickers() ([]BinanceBookTickerDto, time.Duration, error) {
+// BinanceAdapter holds state and logic for interacting with the Binance API.
+type BinanceAdapter struct {
+	FundingRates map[string]BinanceFundingRateDto
+	mu           sync.RWMutex
+}
+
+// NewBinanceAdapter creates a new instance of the BinanceAdapter.
+func NewBinanceAdapter() *BinanceAdapter {
+	return &BinanceAdapter{
+		FundingRates: make(map[string]BinanceFundingRateDto),
+	}
+}
+
+// GetTickers fetches the latest book tickers from Binance.
+func (a *BinanceAdapter) GetTickers() ([]BinanceBookTickerDto, time.Duration, error) {
 	start := time.Now()
 	
-	resp, err := http.Get(BinanceFuturesURL + BinanceBookTickerPath)
+	resp, err := http.Get(binanceFuturesURL + binanceBookTickerPath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to make HTTP request to Binance: %w", err)
+		return nil, 0, fmt.Errorf("failed to make HTTP request to Binance tickers: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, 0, fmt.Errorf("Binance API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		return nil, 0, fmt.Errorf("Binance tickers API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read Binance response body: %w", err)
+		return nil, 0, fmt.Errorf("failed to read Binance tickers response body: %w", err)
 	}
 
 	var tickers []BinanceBookTickerDto
@@ -44,6 +59,46 @@ func GetBinanceTickers() ([]BinanceBookTickerDto, time.Duration, error) {
 
 	duration := time.Since(start)
 	return tickers, duration, nil
+}
+
+// UpdateFundingRates fetches and stores the latest funding rates from Binance.
+func (a *BinanceAdapter) UpdateFundingRates() (time.Duration, error) {
+	start := time.Now()
+
+	resp, err := http.Get(binanceFuturesURL + binanceFundingRatePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to make HTTP request to Binance funding rates: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("Binance funding rates API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read Binance funding rates response body: %w", err)
+	}
+
+	var rates []BinanceFundingRateDto
+	if err := json.Unmarshal(body, &rates); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal Binance funding rates: %w", err)
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for _, rate := range rates {
+		unifiedSymbol, err := UnwrapBinanceSymbol(rate.Symbol)
+		if err != nil {
+			// Ignore symbols we can't unwrap (e.g., non-USDT pairs)
+			continue
+		}
+		a.FundingRates[unifiedSymbol] = rate
+	}
+
+	return time.Since(start), nil
 }
 
 // ToTickerBidAsk converts a BinanceBookTickerDto to a shared.TickerBidAsk.
@@ -72,25 +127,8 @@ func (b BinanceBookTickerDto) ToTickerBidAsk() (shared.TickerBidAsk, error) {
 		Bid:           bid,
 		Ask:           ask,
 		VolumeUSD:     volumeUSD,
-	}, nil
-}
-
-// WrapBinanceSymbol converts a unified symbol (e.g., "BTC/USDT:PERP") to Binance's format (e.g., "BTCUSDT").
-func WrapBinanceSymbol(unifiedSymbol string) (string, error) {
-	// Expecting format "BASE/USDT:PERP"
-	parts := strings.Split(unifiedSymbol, "/")
-	if len(parts) != 2 {
-		return "", shared.ErrInvalidUnifiedSymbol
-	}
-	base := parts[0]
-	
-	quoteAndSuffix := strings.Split(parts[1], ":")
-	if len(quoteAndSuffix) != 2 || quoteAndSuffix[0] != "USDT" || quoteAndSuffix[1] != "PERP" {
-		return "", shared.ErrInvalidUnifiedSymbol
-	}
-	quote := quoteAndSuffix[0]
-
-	return base + quote, nil
+	},
+	nil
 }
 
 // UnwrapBinanceSymbol converts a Binance symbol (e.g., "BTCUSDT") to our unified format (e.g., "BTC/USDT:PERP").

@@ -8,19 +8,29 @@ import (
 	"strings"
 	"time"
 
-	"cex-price-diff-notifications/shared" // Import the shared package
+	"cex-price-diff-notifications/shared"
 )
 
 const (
-	MexcFuturesURL     = "https://contract.mexc.com"
-	MexcBookTickerPath = "/api/v1/contract/ticker"
+	mexcFuturesURL     = "https://contract.mexc.com"
+	mexcBookTickerPath = "/api/v1/contract/ticker"
 )
 
-// GetMexcTickers fetches tickers from Mexc.
-func GetMexcTickers() ([]MexcTickerDto, time.Duration, error) {
+// MexcAdapter holds state and logic for interacting with the Mexc API.
+type MexcAdapter struct {
+	// No state needed yet, but the struct is here for consistency.
+}
+
+// NewMexcAdapter creates a new instance of the MexcAdapter.
+func NewMexcAdapter() *MexcAdapter {
+	return &MexcAdapter{}
+}
+
+// GetTickers fetches the latest book tickers from Mexc.
+func (a *MexcAdapter) GetTickers() ([]MexcTickerDto, time.Duration, error) {
 	start := time.Now()
 
-	resp, err := http.Get(MexcFuturesURL + MexcBookTickerPath)
+	resp, err := http.Get(mexcFuturesURL + mexcBookTickerPath)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to make HTTP request to Mexc: %w", err)
 	}
@@ -63,24 +73,6 @@ func (m MexcTickerDto) ToTickerBidAsk() (shared.TickerBidAsk, error) {
 		Ask:           m.Ask1,
 		VolumeUSD:     m.Amount24,
 	}, nil
-}
-
-// WrapMexcSymbol converts a unified symbol (e.g., "BTC/USDT:PERP") to Mexc's format (e.g., "BTC_USDT").
-func WrapMexcSymbol(unifiedSymbol string) (string, error) {
-	// Expecting format "BASE/USDT:PERP"
-	parts := strings.Split(unifiedSymbol, "/")
-	if len(parts) != 2 {
-		return "", shared.ErrInvalidUnifiedSymbol
-	}
-	base := parts[0]
-	
-	quoteAndSuffix := strings.Split(parts[1], ":")
-	if len(quoteAndSuffix) != 2 || quoteAndSuffix[0] != "USDT" || quoteAndSuffix[1] != "PERP" {
-		return "", shared.ErrInvalidUnifiedSymbol
-	}
-	quote := quoteAndSuffix[0]
-
-	return base + "_" + quote, nil
 }
 
 // UnwrapMexcSymbol converts a Mexc symbol (e.g., "BTC_USDT") to our unified format (e.g., "BTC/USDT:PERP").

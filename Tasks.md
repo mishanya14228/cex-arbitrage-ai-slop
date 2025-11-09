@@ -155,3 +155,90 @@ spreads.collect()
 }
 
 - keep in mind that currently we only have 2 exchanges, but there may be more later, so please make sure this code works no matter how many exchanges we would have.
+
+# Step 6
+
+we also need to keep track of tickers funding rates for both exchanges. lets start with binance:
+
+- endpoint: /fapi/v1/fundingRate
+- response:
+  [
+  {
+  "symbol": "TAUSDT",
+  "fundingTime": 1762632000006,
+  "fundingRate": "0.00005067",
+  "markPrice": "0.04153270"
+  },
+  ]
+
+so the logic should be the following:
+alongside the tickers request we need simultaniously execute funding rate request and save it as a map in an adapter: for example {BTC/USDT:PERP:
+{
+"symbol": "BTCUSDT",
+"fundingTime": 1762632000006,
+"fundingRate": "0.00005067",
+"markPrice": "0.04153270"
+}}
+
+the idea is that we will use this data to add to arbitrage results, but for now lets simply keep it in the adapter memory.
+
+# Step 7
+
+For mexc however we need to come up with some crazy solution. basically we will have the same map in the adapter, but we will receive the data from websockets. The idea is that on adapter init we perform an http request that will get the general information about markets on mexc, the request is:
+
+- endpoint: <https://contract.mexc.com/api/v1/contract/detail>
+- response:
+  {
+  "success": true,
+  "code": 0,
+  "data": [
+  {
+  "symbol": "BTC_USDT"
+  }
+  ]
+  }
+
+after we get the response, we create a similar map as we did with binance, but this time it will be empty, cause the only thing we have for now is symbol information.
+
+# Step 8
+
+To get the information about funding we will use websockets.
+
+- endpoint: wss://contract.mexc.com/edge
+- subscribe message:
+  {
+  "method":"sub.funding.rate",
+  "param":{
+  "symbol":"ETH_USDT"
+  }
+  }
+- unsubscribe message:
+  {
+  "method": "unsub.funding.rate",
+  "param": {
+  "symbol": "BTC_USDT"
+  }
+  }
+  The problem is that we can only have 20 subscription per connection. that's why we will count the amount of tickers we fetched and stored in Step 7, then derive the count of connections required based on that information. so to sum up: we fetch all available tickers, then we simply get the information about funding rate from websockets. the information is then stored in the map of the adapter.
+
+the responses from websockets are:
+
+{
+"symbol": "ETH_USDT",
+"data": {
+"symbol": "ETH_USDT",
+"rate": -0.000046,
+"nextSettleTime": 1762675200000
+},
+"channel": "push.funding.rate",
+"ts": 1762646460326
+}
+
+error example:
+{
+"channel": "rs.error",
+"data": "Not support method",
+"ts": 1762646413886
+}
+
+please make sure we only consume messages for these 2 channels

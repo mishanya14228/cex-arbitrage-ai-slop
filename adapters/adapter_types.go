@@ -8,6 +8,14 @@ type BinanceBookTickerDto struct {
 	AskPrice string `json:"askPrice"`
 }
 
+// BinanceFundingRateDto represents a single funding rate response from Binance.
+type BinanceFundingRateDto struct {
+	Symbol      string `json:"symbol"`
+	FundingTime int64  `json:"fundingTime"`
+	FundingRate string `json:"fundingRate"`
+	MarkPrice   string `json:"markPrice"`
+}
+
 // MexcTickerDto represents a single ticker response from Mexc.
 // We only define the fields we need.
 type MexcTickerDto struct {
