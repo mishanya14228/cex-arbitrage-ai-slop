@@ -4,33 +4,70 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"cex-price-diff-notifications/shared"
 )
 
 const (
-	mexcFuturesURL     = "https://contract.mexc.com"
-	mexcBookTickerPath = "/api/v1/contract/ticker"
+	mexcFuturesURL         = "https://contract.mexc.com"
+	mexcContractDetailPath = "/api/v1/contract/detail"
+	mexcTickersPath        = "/api/v1/contract/ticker"
 )
 
 // MexcAdapter holds state and logic for interacting with the Mexc API.
 type MexcAdapter struct {
-	// No state needed yet, but the struct is here for consistency.
+	FundingRates map[string]MexcFundingRateData
+	mu           sync.RWMutex
+	symbols      []string
 }
 
-// NewMexcAdapter creates a new instance of the MexcAdapter.
-func NewMexcAdapter() *MexcAdapter {
-	return &MexcAdapter{}
+// NewMexcAdapter creates a new instance of the MexcAdapter and starts WebSocket connections.
+func NewMexcAdapter() (*MexcAdapter, error) {
+	slog.Info("Initializing Mexc adapter...")
+	
+	resp, err := http.Get(mexcFuturesURL + mexcContractDetailPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch Mexc contract details: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Mexc contract details response: %w", err)
+	}
+
+	var detailResponse MexcContractDetailResponse
+	if err := json.Unmarshal(body, &detailResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal Mexc contract details: %w", err)
+	}
+	if !detailResponse.Success {
+		return nil, fmt.Errorf("Mexc contract details API returned success: false")
+	}
+
+	adapter := &MexcAdapter{
+		FundingRates: make(map[string]MexcFundingRateData),
+	}
+	for _, detail := range detailResponse.Data {
+		adapter.symbols = append(adapter.symbols, detail.Symbol)
+	}
+	slog.Info("Fetched all Mexc symbols", "count", len(adapter.symbols))
+
+	// Start WebSocket connections in the background
+	adapter.startWsConnections()
+
+	return adapter, nil
 }
 
 // GetTickers fetches the latest book tickers from Mexc.
 func (a *MexcAdapter) GetTickers() ([]MexcTickerDto, time.Duration, error) {
 	start := time.Now()
 
-	resp, err := http.Get(mexcFuturesURL + mexcBookTickerPath)
+	resp, err := http.Get(mexcFuturesURL + mexcTickersPath)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to make HTTP request to Mexc: %w", err)
 	}

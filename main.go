@@ -25,11 +25,17 @@ func main() {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	slog.Info("Application starting")
+	slog.Info("Application starting, initializing adapters...")
 
 	// Create adapter instances
 	binanceAdapter := adapters.NewBinanceAdapter()
-	mexcAdapter := adapters.NewMexcAdapter()
+	mexcAdapter, err := adapters.NewMexcAdapter()
+	if err != nil {
+		slog.Error("Failed to initialize Mexc adapter", "error", err)
+		os.Exit(1) // Exit if a critical component fails to start
+	}
+
+	slog.Info("Adapters initialized, starting main loop.")
 
 	// Create a ticker that fires every 5 seconds
 	ticker := time.NewTicker(5 * time.Second)

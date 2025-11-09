@@ -16,6 +16,33 @@ type BinanceFundingRateDto struct {
 	MarkPrice   string `json:"markPrice"`
 }
 
+// MexcContractDetailDto represents a single contract detail from Mexc.
+type MexcContractDetailDto struct {
+	Symbol string `json:"symbol"`
+}
+
+// MexcContractDetailResponse represents the full response from Mexc's contract detail endpoint.
+type MexcContractDetailResponse struct {
+	Success bool                    `json:"success"`
+	Code    int                     `json:"code"`
+	Data    []MexcContractDetailDto `json:"data"`
+}
+
+// MexcFundingRateData represents the inner 'data' object of a funding rate message.
+type MexcFundingRateData struct {
+	Symbol         string  `json:"symbol"`
+	Rate           float64 `json:"rate"`
+	NextSettleTime int64   `json:"nextSettleTime"`
+}
+
+// MexcFundingRateMessage represents the full WebSocket message for a funding rate update.
+type MexcFundingRateMessage struct {
+	Channel string              `json:"channel"`
+	Symbol  string              `json:"symbol"`
+	Data    MexcFundingRateData `json:"data"`
+	Ts      int64               `json:"ts"`
+}
+
 // MexcTickerDto represents a single ticker response from Mexc.
 // We only define the fields we need.
 type MexcTickerDto struct {

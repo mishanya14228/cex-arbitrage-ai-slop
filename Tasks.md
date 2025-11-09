@@ -242,3 +242,8 @@ error example:
 }
 
 please make sure we only consume messages for these 2 channels
+
+# TODO
+
+- Implement graceful shutdown for WebSocket connections on application exit (Ctrl+C).
+- Implement automatic reconnection and re-subscription logic for dropped WebSocket connections.
