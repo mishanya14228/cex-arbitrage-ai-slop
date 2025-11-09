@@ -7,7 +7,9 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -34,6 +36,31 @@ func main() {
 		slog.Error("Failed to initialize Mexc adapter", "error", err)
 		os.Exit(1) // Exit if a critical component fails to start
 	}
+	defer mexcAdapter.Close() // Ensure connections are closed on exit
+
+	// Set up a channel to listen for OS signals (like Ctrl+C)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Goroutine to handle graceful shutdown
+	go func() {
+		<-sigChan
+		slog.Info("Shutdown signal received, closing connections...")
+		mexcAdapter.Close()
+		// Potentially add other cleanup here
+		os.Exit(0)
+	}()
+
+	// Goroutine to restart Mexc adapter every 5 minutes
+	go func() {
+		restartTicker := time.NewTicker(5 * time.Minute)
+		defer restartTicker.Stop()
+		for range restartTicker.C {
+			if err := mexcAdapter.Restart(); err != nil {
+				slog.Error("Failed to restart Mexc adapter", "error", err)
+			}
+		}
+	}()
 
 	slog.Info("Adapters initialized, starting main loop.")
 

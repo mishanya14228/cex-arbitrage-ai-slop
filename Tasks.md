@@ -243,7 +243,46 @@ error example:
 
 please make sure we only consume messages for these 2 channels
 
-# TODO
+# Step 9
 
-- Implement graceful shutdown for WebSocket connections on application exit (Ctrl+C).
-- Implement automatic reconnection and re-subscription logic for dropped WebSocket connections.
+we dont really need to bother about being super efficient, so we dont really care about disconnects. lets add a "Restart" function to adapter, that will run every 5 minutes and it will refetch contract/detail request and restart all sockets. so we can simply kill the connections and repeat the cycle.
+
+# Step 10
+
+add ping to connections
+send a message with the content:
+{
+"method": "ping"
+}
+every 20 seconds
+
+# Step 11
+
+we need to fix the funding rate of binance, we used the wrong http request
+we should use "premiumIndex" and "fundingInfo" requests instead of "fundingRate"
+
+response for fundingInfo is :
+[
+{
+"symbol": "GTCUSDT",
+"fundingIntervalHours": 8,
+}
+]
+and for "premiumIndex" it's :
+[
+{
+"symbol": "ACHUSDT",
+"lastFundingRate": "-0.00064762",
+"nextFundingTime": 1762675200000,
+}
+]
+
+so by using these 2 requests we should get information about interval, next funding time and funding rate ("lastFundingRate" field), and store this in the adapter
+
+
+# Step 12
+we need to start pushing messages to rabbitmq:
+- add field to "Opportunity" model - "funding_spread_8h"
+- keep it null for now
+- define a non durable queue for rabbimq called "arbitrage_event"
+- push Opportunity to this queue

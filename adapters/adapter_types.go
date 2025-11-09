@@ -8,12 +8,25 @@ type BinanceBookTickerDto struct {
 	AskPrice string `json:"askPrice"`
 }
 
-// BinanceFundingRateDto represents a single funding rate response from Binance.
+// BinancePremiumIndexDto represents a single premium index response from Binance.
+type BinancePremiumIndexDto struct {
+	Symbol          string `json:"symbol"`
+	LastFundingRate string `json:"lastFundingRate"`
+	NextFundingTime int64  `json:"nextFundingTime"`
+}
+
+// BinanceFundingInfoDto represents a single funding info response from Binance.
+type BinanceFundingInfoDto struct {
+	Symbol               string `json:"symbol"`
+	FundingIntervalHours int    `json:"fundingIntervalHours"`
+}
+
+// BinanceFundingRateDto represents the combined funding rate information for Binance.
 type BinanceFundingRateDto struct {
-	Symbol      string `json:"symbol"`
-	FundingTime int64  `json:"fundingTime"`
-	FundingRate string `json:"fundingRate"`
-	MarkPrice   string `json:"markPrice"`
+	Symbol               string `json:"symbol"`
+	LastFundingRate      string `json:"lastFundingRate"`
+	NextFundingTime      int64  `json:"nextFundingTime"`
+	FundingIntervalHours int    `json:"fundingIntervalHours"`
 }
 
 // MexcContractDetailDto represents a single contract detail from Mexc.

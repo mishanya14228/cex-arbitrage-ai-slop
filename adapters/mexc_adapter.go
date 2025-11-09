@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context" // Added context import
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,43 +25,95 @@ type MexcAdapter struct {
 	FundingRates map[string]MexcFundingRateData
 	mu           sync.RWMutex
 	symbols      []string
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewMexcAdapter creates a new instance of the MexcAdapter and starts WebSocket connections.
 func NewMexcAdapter() (*MexcAdapter, error) {
 	slog.Info("Initializing Mexc adapter...")
-	
+
+	adapter := &MexcAdapter{
+		FundingRates: make(map[string]MexcFundingRateData),
+	}
+
+	// Initial setup of context
+	adapter.ctx, adapter.cancel = context.WithCancel(context.Background())
+
+	if err := adapter.initConnections(); err != nil {
+		adapter.cancel() // Ensure context is cancelled on init failure
+		return nil, err
+	}
+
+	return adapter, nil
+}
+
+// initConnections fetches contract details and starts WebSocket connections.
+// This is called by NewMexcAdapter and Restart.
+func (a *MexcAdapter) initConnections() error {
+	// 1. Fetch all contract details to get the list of symbols
 	resp, err := http.Get(mexcFuturesURL + mexcContractDetailPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch Mexc contract details: %w", err)
+		return fmt.Errorf("failed to fetch Mexc contract details: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read Mexc contract details response: %w", err)
+		return fmt.Errorf("failed to read Mexc contract details response: %w", err)
 	}
 
 	var detailResponse MexcContractDetailResponse
 	if err := json.Unmarshal(body, &detailResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal Mexc contract details: %w", err)
+		return fmt.Errorf("failed to unmarshal Mexc contract details: %w", err)
 	}
 	if !detailResponse.Success {
-		return nil, fmt.Errorf("Mexc contract details API returned success: false")
+		return fmt.Errorf("Mexc contract details API returned success: false")
 	}
 
-	adapter := &MexcAdapter{
-		FundingRates: make(map[string]MexcFundingRateData),
-	}
+	a.symbols = nil // Clear old symbols
 	for _, detail := range detailResponse.Data {
-		adapter.symbols = append(adapter.symbols, detail.Symbol)
+		a.symbols = append(a.symbols, detail.Symbol)
 	}
-	slog.Info("Fetched all Mexc symbols", "count", len(adapter.symbols))
+	slog.Info("Fetched all Mexc symbols", "count", len(a.symbols))
+
+	// Clear old funding rates
+	a.mu.Lock()
+	a.FundingRates = make(map[string]MexcFundingRateData)
+	a.mu.Unlock()
 
 	// Start WebSocket connections in the background
-	adapter.startWsConnections()
+	a.startWsConnections(a.ctx) // Pass the adapter's context
 
-	return adapter, nil
+	return nil
+}
+
+// Restart closes existing connections and re-initializes them.
+func (a *MexcAdapter) Restart() error {
+	slog.Info("Restarting Mexc adapter connections...")
+
+	// 1. Cancel the old context to stop existing goroutines
+	a.cancel()
+	// Give some time for goroutines to shut down gracefully
+	time.Sleep(1 * time.Second)
+
+	// 2. Create a new context for new goroutines
+	a.ctx, a.cancel = context.WithCancel(context.Background())
+
+	// 3. Re-initialize connections
+	if err := a.initConnections(); err != nil {
+		a.cancel() // Ensure context is cancelled on init failure
+		return fmt.Errorf("failed to re-initialize Mexc connections during restart: %w", err)
+	}
+	slog.Info("Mexc adapter connections restarted successfully.")
+	return nil
+}
+
+// Close cancels the adapter's context, stopping all associated goroutines.
+func (a *MexcAdapter) Close() {
+	slog.Info("Closing Mexc adapter...")
+	a.cancel()
 }
 
 // GetTickers fetches the latest book tickers from Mexc.
