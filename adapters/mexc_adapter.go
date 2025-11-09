@@ -1,0 +1,93 @@
+package adapters
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"cex-price-diff-notifications/shared" // Import the shared package
+)
+
+const (
+	MexcFuturesURL     = "https://contract.mexc.com"
+	MexcBookTickerPath = "/api/v1/contract/ticker"
+)
+
+// GetMexcTickers fetches tickers from Mexc.
+func GetMexcTickers() ([]MexcTickerDto, time.Duration, error) {
+	start := time.Now()
+
+	resp, err := http.Get(MexcFuturesURL + MexcBookTickerPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to make HTTP request to Mexc: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, 0, fmt.Errorf("Mexc API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read Mexc response body: %w", err)
+	}
+
+	var mexcResponse MexcTickersResponse
+	if err := json.Unmarshal(body, &mexcResponse); err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal Mexc tickers: %w", err)
+	}
+
+	if !mexcResponse.Success {
+		return nil, 0, fmt.Errorf("Mexc API returned success: false, code: %d", mexcResponse.Code)
+	}
+
+	duration := time.Since(start)
+	return mexcResponse.Data, duration, nil
+}
+
+// ToTickerBidAsk converts a MexcTickerDto to a shared.TickerBidAsk.
+func (m MexcTickerDto) ToTickerBidAsk() (shared.TickerBidAsk, error) {
+	unifiedSymbol, err := UnwrapMexcSymbol(m.Symbol)
+	if err != nil {
+		return shared.TickerBidAsk{}, fmt.Errorf("failed to unwrap Mexc symbol %s: %w", m.Symbol, err)
+	}
+
+	return shared.TickerBidAsk{
+		Symbol:        m.Symbol,
+		UnifiedSymbol: unifiedSymbol,
+		Bid:           m.Bid1,
+		Ask:           m.Ask1,
+		VolumeUSD:     m.Amount24,
+	}, nil
+}
+
+// WrapMexcSymbol converts a unified symbol (e.g., "BTC/USDT:PERP") to Mexc's format (e.g., "BTC_USDT").
+func WrapMexcSymbol(unifiedSymbol string) (string, error) {
+	// Expecting format "BASE/USDT:PERP"
+	parts := strings.Split(unifiedSymbol, "/")
+	if len(parts) != 2 {
+		return "", shared.ErrInvalidUnifiedSymbol
+	}
+	base := parts[0]
+	
+	quoteAndSuffix := strings.Split(parts[1], ":")
+	if len(quoteAndSuffix) != 2 || quoteAndSuffix[0] != "USDT" || quoteAndSuffix[1] != "PERP" {
+		return "", shared.ErrInvalidUnifiedSymbol
+	}
+	quote := quoteAndSuffix[0]
+
+	return base + "_" + quote, nil
+}
+
+// UnwrapMexcSymbol converts a Mexc symbol (e.g., "BTC_USDT") to our unified format (e.g., "BTC/USDT:PERP").
+func UnwrapMexcSymbol(mexcSymbol string) (string, error) {
+	if !strings.HasSuffix(mexcSymbol, "_USDT") {
+		return "", shared.ErrUnsupportedQuoteCurrency
+	}
+	base := strings.TrimSuffix(mexcSymbol, "_USDT")
+	return base + "/USDT:PERP", nil
+}
