@@ -4,7 +4,10 @@ import (
 	"cex-price-diff-notifications/adapters"
 	"cex-price-diff-notifications/arbitrage"
 	"cex-price-diff-notifications/shared"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,10 +15,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/lmittmann/tint"
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+const (
+	rabbitMQQueueName = "arbitrage_event"
 )
 
 func main() {
+	// Load .env file. It's not an error if it doesn't exist.
+	_ = godotenv.Load()
+
 	// set up a new colorful handler
 	handler := tint.NewHandler(os.Stdout, &tint.Options{
 		AddSource:  true,
@@ -38,6 +50,44 @@ func main() {
 	}
 	defer mexcAdapter.Close() // Ensure connections are closed on exit
 
+	// Set up RabbitMQ
+	rabbitUser := os.Getenv("RABBITMQ_DEFAULT_USER")
+	rabbitPass := os.Getenv("RABBITMQ_DEFAULT_PASS")
+	rabbitHost := os.Getenv("RABBITMQ_HOST")
+	if rabbitHost == "" {
+		rabbitHost = "rabbitmq" // Default to localhost if not set
+	}
+	rabbitMQURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", rabbitUser, rabbitPass, rabbitHost)
+	slog.Info("Connecting to RabbitMQ", "url", rabbitMQURL)
+
+	conn, err := amqp.Dial(rabbitMQURL)
+	if err != nil {
+		slog.Error("Failed to connect to RabbitMQ", "error", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		slog.Error("Failed to open a RabbitMQ channel", "error", err)
+		os.Exit(1)
+	}
+	defer ch.Close()
+
+	q, err := ch.QueueDeclare(
+		rabbitMQQueueName, // name
+		false,             // durable
+		false,             // delete when unused
+		false,             // exclusive
+		false,             // no-wait
+		nil,               // arguments
+	)
+	if err != nil {
+		slog.Error("Failed to declare a RabbitMQ queue", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("RabbitMQ queue declared", "queue_name", q.Name)
+
 	// Set up a channel to listen for OS signals (like Ctrl+C)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -47,7 +97,8 @@ func main() {
 		<-sigChan
 		slog.Info("Shutdown signal received, closing connections...")
 		mexcAdapter.Close()
-		// Potentially add other cleanup here
+		ch.Close()
+		conn.Close()
 		os.Exit(0)
 	}()
 
@@ -154,17 +205,37 @@ func main() {
 		} else {
 			slog.Info("Top arbitrage opportunities found:")
 			for i, s := range spreads {
-				if i >= 5 { // Log top 5
-					break
+				if i < 5 { // Log top 5
+					slog.Info("Opportunity",
+						"symbol", s.UnifiedSymbol,
+						"buy_at", s.ExchangeLong,
+						"sell_at", s.ExchangeShort,
+						"entry_spread_%", s.EntrySpread,
+						"exit_spread_%", s.ExitSpread,
+					)
 				}
-				slog.Info("Opportunity",
-					"symbol", s.UnifiedSymbol,
-					"buy_at", s.ExchangeLong,
-					"sell_at", s.ExchangeShort,
-					"entry_spread_%", s.EntrySpread,
-					"exit_spread_%", s.ExitSpread,
-				)
+
+				// Publish to RabbitMQ
+				body, err := json.Marshal(s)
+				if err != nil {
+					slog.Error("Failed to marshal spread to JSON", "error", err)
+					continue
+				}
+
+				err = ch.PublishWithContext(context.Background(),
+					"",     // exchange
+					q.Name, // routing key
+					false,  // mandatory
+					false,  // immediate
+					amqp.Publishing{
+						ContentType: "application/json",
+						Body:        body,
+					})
+				if err != nil {
+					slog.Error("Failed to publish a message to RabbitMQ", "error", err)
+				}
 			}
+			slog.Info("Published arbitrage opportunities to RabbitMQ", "count", len(spreads))
 		}
 
 		slog.Info("Ticker fetching cycle complete.")
